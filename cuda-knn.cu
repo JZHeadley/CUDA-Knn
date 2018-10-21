@@ -21,8 +21,8 @@
 
 #include "knn.h"
 using namespace std;
-#define DEBUG true
-#define K 3
+#define DEBUG false
+#define K 1
 
 #define MIN(a,b) (((a)<(b))?(a):(b))
 #define NUM_STREAMS 4
@@ -31,8 +31,8 @@ __global__ void computeDistances(int numInstances, int numAttributes, float* dat
 {
 	int tid = blockDim.x * blockIdx.x + threadIdx.x;
 	int row = tid / numInstances; // instance1Index
-//	int column = tid - ((tid / numInstances) * numInstances); //instance2Index
-	int column = tid % numInstances;
+	int column = tid - ((tid / numInstances) * numInstances); //instance2Index
+//	int column = tid % numInstances;
 	if ((tid < numInstances * numInstances))
 	{
 		float sum = 0;
@@ -68,22 +68,21 @@ __inline__ __device__ void reduceToK(float* distancesTo, int* indexes, int k, in
 		}
 	}
 }
-__inline__ __device__ void vote(float* distancesTo, int* predictions, int *indexes, float* dataset, int k, int numAttributes)
+__inline__ __device__ int vote(float* distancesTo, int *indexes, float* dataset, int k, int numAttributes)
 {
-	int classVotes[32];
-	for (int i = 0; i < k; i++)
-	{
-
-		int classNum = dataset[indexes[i] * numAttributes + numAttributes - 1];
-		classVotes[classNum] += 1;
-		if (blockIdx.x == 1 && threadIdx.x == 1)
-		{
-			printf("instance %i votes for the class to be %i\n", indexes[i], classNum);
-		}
-	}
+	int classVotes[32]; // can technically parallelize this reading in the class num and probably should come back and do that
+	bool duplicate = false;
 	int finalClass;
 	int mostVotes = 0;
+
 	for (int i = 0; i < 32; i++)
+		classVotes[i] = 0;
+	for (int i = 0; i < k; i++)
+	{
+		int classNum = dataset[indexes[i] * numAttributes + numAttributes - 1];
+		classVotes[classNum] += 1;
+	}
+	for (int i = 0; i < 32; i++) // have to find highest count first
 	{
 		if (classVotes[i] > mostVotes)
 		{
@@ -91,14 +90,17 @@ __inline__ __device__ void vote(float* distancesTo, int* predictions, int *index
 			mostVotes = classVotes[i];
 		}
 	}
-//	for (int i = 0; i < 32; i++)
-//	{
-//		if (classVotes[i] == mostVotes && i != finalClass)
-//		{
-//			vote(distancesTo, predictions, indexes, dataset, k-1, numAttributes);
-//		}
-//	}
-	predictions[blockIdx.x] = finalClass;
+	for (int i = 0; i < 32; i++) // then compare to that to ensure we don't have duplicates
+	{
+		if (classVotes[i] == mostVotes && classVotes[i] > 0)
+		{
+//			printf("block %i i is %i and finalClass is %i\n", blockIdx.x, i, finalClass);
+			duplicate = true;
+		}
+	}
+//	if (duplicate)
+//		return vote(distancesTo, indexes, dataset, k - 1, numAttributes);
+	return finalClass;
 }
 
 __global__ void knn(int* predictions, float*distances, float*dataset, int numAttributes)
@@ -128,24 +130,24 @@ __global__ void knn(int* predictions, float*distances, float*dataset, int numAtt
 				}
 				if (distances[distancePos] < bestDistance)
 				{
-					if (bestDistance != INT_MAX && blockIdx.x == 1)
-					{
-						printf("We have a new best distance of %f at pos %i which beats %f at pos %i\n", distances[distancePos], i, bestDistance,
-								bestInstanceId);
-					}
-					if (blockIdx.x == 1 && bestDistance != INT_MAX)
-						printf("best instanceId is %i\n", bestInstanceId);
+//					if (bestDistance != INT_MAX && blockIdx.x == 1)
+//					{
+//						printf("We have a new best distance of %f at pos %i which beats %f at pos %i\n", distances[distancePos], i, bestDistance,
+//								bestInstanceId);
+//					}
+//					if (blockIdx.x == 1 && bestDistance != INT_MAX)
+//						printf("best instanceId is %i\n", bestInstanceId);
 					bestDistance = distances[distancePos];
 					bestInstanceId = i;
-					if (blockIdx.x == 1 && bestDistance != INT_MAX)
-						printf("new best instanceId is %i\n", bestInstanceId);
+//					if (blockIdx.x == 1 && bestDistance != INT_MAX)
+//						printf("new best instanceId is %i\n", bestInstanceId);
 				}
 			}
-			if (blockIdx.x == 1 && threadIdx.x != bestInstanceId)
-				printf("Thread %i has best distance with instance %i\n", threadIdx.x, bestInstanceId);
+//			if (blockIdx.x == 1 && threadIdx.x != bestInstanceId)
+//				printf("Thread %i has best distance with instance %i\n", threadIdx.x, bestInstanceId);
 			indexes[threadIdx.x] = bestInstanceId;
-			if (blockIdx.x == 1 && threadIdx.x != bestInstanceId)
-				printf("thread %i has best distance with instance %i\n", threadIdx.x, indexes[threadIdx.x]);
+//			if (blockIdx.x == 1 && threadIdx.x != bestInstanceId)
+//				printf("thread %i has best distance with instance %i\n", threadIdx.x, indexes[threadIdx.x]);
 
 			distancesTo[threadIdx.x] = bestDistance;
 		}
@@ -212,12 +214,11 @@ __global__ void knn(int* predictions, float*distances, float*dataset, int numAtt
 			if (s > K && threadIdx.x == 1)
 			{ // we need to reduce it just a little more
 			  // remember to change both the indexes and distancesTo arrays
-//				printf("need to reduce from %i to %i\n", s, K);
 				reduceToK(distancesTo, indexes, K, s);
 			}
 			__syncthreads();
 			if (threadIdx.x == 1)
-				vote(distancesTo, predictions, indexes, dataset, K, numAttributes);
+				predictions[blockIdx.x] = vote(distancesTo, indexes, dataset, K, numAttributes);
 		}
 	}
 }

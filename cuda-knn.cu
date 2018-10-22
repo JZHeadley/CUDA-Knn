@@ -17,14 +17,12 @@
 #include <limits.h>
 
 #include "libarff/arff_parser.h"
-#include "libarff/arff_data.h"
 
 #include "knn.h"
 using namespace std;
 #define K 3
 
-#define MIN(a,b) (((a)<(b))?(a):(b))
-#define NUM_STREAMS 4
+#define NUM_STREAMS 2
 
 __global__ void computeDistances(int numInstances, int numAttributes, float* dataset, float* distances)
 {
@@ -95,7 +93,9 @@ __inline__ __device__ int vote(float* distancesTo, int *indexes, float* dataset,
 	if (duplicate)
 	{
 		if ((k - 1) > 0) // I'm not quite sure why I'm detecting dupes when k=1 but I am soo... this takes care of that and makes everything correct again...
+		{
 			return vote(distancesTo, indexes, dataset, k - 1, numAttributes);
+		}
 	}
 	return finalClass;
 }
@@ -247,47 +247,8 @@ int main(int argc, char* argv[])
 
 	int* confusionMatrix = computeConfusionMatrix(h_predictions, dataset);
 	float accuracy = computeAccuracy(confusionMatrix, dataset);
-
 	printf("The KNN classifier for %lu instances required %llu ms CPU time. Accuracy was %.4f\n", numInstances, (long long unsigned int) milliseconds,
 			accuracy);
 
 	return 0;
 }
-
-int* computeConfusionMatrix(int* predictions, ArffData* dataset)
-{
-	int* confusionMatrix = (int*) calloc(dataset->num_classes() * dataset->num_classes(), sizeof(int)); // matriz size numberClasses x numberClasses
-
-	for (int i = 0; i < dataset->num_instances(); i++) // for each instance compare the true class and predicted class
-	{
-		int trueClass = dataset->get_instance(i)->get(dataset->num_attributes() - 1)->operator int32();
-		int predictedClass = predictions[i];
-
-		confusionMatrix[trueClass * dataset->num_classes() + predictedClass]++;
-	}
-
-	return confusionMatrix;
-}
-
-float computeAccuracy(int* confusionMatrix, ArffData* dataset)
-{
-	int successfulPredictions = 0;
-
-	for (int i = 0; i < dataset->num_classes(); i++)
-	{
-		successfulPredictions += confusionMatrix[i * dataset->num_classes() + i]; // elements in the diagnoal are correct predictions
-	}
-
-	return successfulPredictions / (float) dataset->num_instances();
-}
-
-double euclideanDistance(ArffInstance* instance1, ArffInstance* instance2, int numAttributes)
-{
-	double sum = 0;
-	for (int attributeIndex = 0; attributeIndex < (numAttributes - 1); attributeIndex++)
-	{
-		sum += pow((instance2->get(attributeIndex)->operator int32()) - (instance1->get(attributeIndex)->operator int32()), 2);
-	}
-	return sqrt(sum);
-}
-

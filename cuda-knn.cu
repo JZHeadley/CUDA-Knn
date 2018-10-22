@@ -21,8 +21,7 @@
 
 #include "knn.h"
 using namespace std;
-#define DEBUG false
-#define K 1
+#define K 3
 
 #define MIN(a,b) (((a)<(b))?(a):(b))
 #define NUM_STREAMS 4
@@ -32,7 +31,6 @@ __global__ void computeDistances(int numInstances, int numAttributes, float* dat
 	int tid = blockDim.x * blockIdx.x + threadIdx.x;
 	int row = tid / numInstances; // instance1Index
 	int column = tid - ((tid / numInstances) * numInstances); //instance2Index
-//	int column = tid % numInstances;
 	if ((tid < numInstances * numInstances))
 	{
 		float sum = 0;
@@ -74,7 +72,6 @@ __inline__ __device__ int vote(float* distancesTo, int *indexes, float* dataset,
 	bool duplicate = false;
 	int finalClass;
 	int mostVotes = 0;
-
 	for (int i = 0; i < 32; i++)
 		classVotes[i] = 0;
 	for (int i = 0; i < k; i++)
@@ -93,13 +90,13 @@ __inline__ __device__ int vote(float* distancesTo, int *indexes, float* dataset,
 	for (int i = 0; i < 32; i++) // then compare to that to ensure we don't have duplicates
 	{
 		if (classVotes[i] == mostVotes && classVotes[i] > 0)
-		{
-//			printf("block %i i is %i and finalClass is %i\n", blockIdx.x, i, finalClass);
 			duplicate = true;
-		}
 	}
-//	if (duplicate)
-//		return vote(distancesTo, indexes, dataset, k - 1, numAttributes);
+	if (duplicate)
+	{
+		if ((k - 1) > 0) // I'm not quite sure why I'm detecting dupes when k=1 but I am soo... this takes care of that and makes everything correct again...
+			return vote(distancesTo, indexes, dataset, k - 1, numAttributes);
+	}
 	return finalClass;
 }
 
@@ -107,7 +104,6 @@ __global__ void knn(int* predictions, float*distances, float*dataset, int numAtt
 {
 	__shared__ int indexes[256];
 	__shared__ float distancesTo[256];
-
 	// gridDim.x is numInstances
 	int bestInstanceId;
 	float bestDistance = INT_MAX;
@@ -130,37 +126,15 @@ __global__ void knn(int* predictions, float*distances, float*dataset, int numAtt
 				}
 				if (distances[distancePos] < bestDistance)
 				{
-//					if (bestDistance != INT_MAX && blockIdx.x == 1)
-//					{
-//						printf("We have a new best distance of %f at pos %i which beats %f at pos %i\n", distances[distancePos], i, bestDistance,
-//								bestInstanceId);
-//					}
-//					if (blockIdx.x == 1 && bestDistance != INT_MAX)
-//						printf("best instanceId is %i\n", bestInstanceId);
 					bestDistance = distances[distancePos];
 					bestInstanceId = i;
-//					if (blockIdx.x == 1 && bestDistance != INT_MAX)
-//						printf("new best instanceId is %i\n", bestInstanceId);
 				}
 			}
-//			if (blockIdx.x == 1 && threadIdx.x != bestInstanceId)
-//				printf("Thread %i has best distance with instance %i\n", threadIdx.x, bestInstanceId);
 			indexes[threadIdx.x] = bestInstanceId;
-//			if (blockIdx.x == 1 && threadIdx.x != bestInstanceId)
-//				printf("thread %i has best distance with instance %i\n", threadIdx.x, indexes[threadIdx.x]);
-
 			distancesTo[threadIdx.x] = bestDistance;
 		}
 		__syncthreads();
 
-		if (DEBUG && blockIdx.x == 1 && threadIdx.x == 1)
-		{
-			for (int i = 0; i < blockDim.x; i++)
-			{
-				printf("(%i, %.2f) ", indexes[i], distancesTo[i]);
-			}
-			printf("\n");
-		}
 		if (threadIdx.x < blockDim.x / 2) // only need the first half(128) of the threads to work on the 256 length shared mem arrays
 		{
 			int s;
@@ -168,46 +142,15 @@ __global__ void knn(int* predictions, float*distances, float*dataset, int numAtt
 			// we're going with this until I find that error and just upping s back up after this for
 			for (s = blockDim.x / 2; (s) > K; s >>= 1)
 			{
-//				if (threadIdx.x == 0 && blockIdx.x == 0)
-//					printf("s is %i\n", s);
 				if (threadIdx.x < s)
 				{
-
 					if (distancesTo[threadIdx.x + s] < distancesTo[threadIdx.x])
 					{
-//						if (DEBUG && blockIdx.x == 1)
-//							printf("sharedMem[%i] with value %f WAS LESS THAN sharedMem[%i] with value %f\n", threadIdx.x + s,
-//									distancesTo[threadIdx.x + s], threadIdx.x, distancesTo[threadIdx.x]);
 						distancesTo[threadIdx.x] = distancesTo[threadIdx.x + s];
 						indexes[threadIdx.x] = indexes[threadIdx.x + s];
-						if (DEBUG)
-						{
-							distancesTo[threadIdx.x + s] = 0;
-							indexes[threadIdx.x + s] = 0;
-						}
-					}
-					else
-					{
-//						if (DEBUG && blockIdx.x == 1)
-//							printf("sharedMem[%i] with value %f was not less than sharedMem[%i] with value %f\n", threadIdx.x + s,
-//									distancesTo[threadIdx.x + s], threadIdx.x, distancesTo[threadIdx.x]);
-						if (DEBUG)
-						{
-							distancesTo[threadIdx.x + s] = 0;
-							indexes[threadIdx.x + s] = 0;
-						}
 					}
 					__syncthreads();
 				}
-			}
-
-			if (DEBUG && blockIdx.x == 1 && threadIdx.x == 1)
-			{
-				for (int i = 0; i < blockDim.x; i++)
-				{
-					printf("(%i, %.2f) ", indexes[i], distancesTo[i]);
-				}
-				printf("\n");
 			}
 			s *= 2;
 			__syncthreads();
@@ -284,23 +227,6 @@ int main(int argc, char* argv[])
 	cudaMemcpyAsync(d_dataset, h_dataset, numInstances * numAttributes * sizeof(float), cudaMemcpyHostToDevice, streams[0]);
 	cudaMemcpyAsync(d_distances, h_distances, numTriangularSpaces * sizeof(float), cudaMemcpyHostToDevice, streams[0]);
 	computeDistances<<<blocksPerGrid, threadsPerBlock, 0, streams[0]>>>(numInstances, numAttributes, d_dataset, d_distances);
-	if (DEBUG)
-	{
-		if (numInstances < 32)
-		{
-			cudaMemcpyAsync(h_distances, d_distances, numTriangularSpaces * sizeof(float), cudaMemcpyDeviceToHost, streams[0]);
-
-			for (int i = 0; i < numInstances; i++)
-			{
-				for (int j = 0; j < numInstances; j++)
-				{
-					int position = (i * numInstances + j);
-					printf("%.2f\t", h_distances[position]);
-				}
-				printf("\n");
-			}
-		}
-	}
 
 	cudaMemcpyAsync(d_predictions, h_predictions, numInstances * sizeof(int), cudaMemcpyHostToDevice, streams[1]);
 	cudaStreamSynchronize(streams[0]); // need this to ensure that the previous kernel computing the distances is finished otherwise we might not have the full distance matrix
